@@ -1,20 +1,41 @@
 import sys, json, time, traceback, argparse, os, requests, io, string, math, socket, re
 from selenium.common.exceptions import StaleElementReferenceException
-from threading import Thread, Lock
+from threading import Thread, Lock, Semaphore
 from splinter import Browser
 from splinter.exceptions import ElementDoesNotExist
 from PIL import Image, ImageOps
 from urllib.parse import urljoin
 from requests.exceptions import ConnectionError
 from selenium.common.exceptions import TimeoutException, ElementNotInteractableException
-from queue import Queue
+#from queue import Queue
 from concurrent.futures import ThreadPoolExecutor as Executor
+import concurrent.futures
 from .config import *
 
 
-dl_file_lock = Lock()
-dl_queue = Queue(DOWNLOAD_PROCESSES)
+no_parallel_execution_lock = Lock()
+def no_parallel_execution(func):
+    def f(*args, **xargs):
+        with no_parallel_execution_lock: return func(*args, **xargs)
+    return f
 
+def retry_after_exception(func):
+    def f(*args, **xargs):
+        while True:
+            try: return func(*args, **xargs)
+            except Exception:
+                traceback.print_exc()
+                time.sleep(10)
+    return f
+
+def sanitize(s):
+    valid_chars = "ÄÖÜäöüß-_.() %s%s" % (string.ascii_letters, string.digits)
+    return ''.join(c for c in s if c in valid_chars)
+
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 def main():
     #crawl(["https://www.archion.de/de/viewer/?no_cache=1&type=churchRegister&uid=258332"])
@@ -41,31 +62,34 @@ def crawl(viewers):
 
 class Logger:
     _progress = {}
+    _buffer = (0, 1)
 
-    def update(self, name, progress, total):
-        name = str(name)
-        if name not in self._progress:
-            sys.stderr.write(f"Starting {name}\n")
-        if progress == total:
-            del self._progress[name]
-            sys.stderr.write(f"Finished {name}\n")
-        else: self._progress[name] = [progress, total, 0, 1]
+    def update_buffer(self, semaphore):
+        self._buffer = [semaphore.used, semaphore.total]
+        self._update()
+
+    def starting_page(self, filename, page_no, page_total, tiles_total):
+        if tiles_total == 0: tiles_total = -1
+        self._progress[filename] = [page_no, page_total, 0, tiles_total]
+        self._update()
+
+    def finished_page(self, filename):
+        del self._progress[filename]
+        self._update()
+
+    def notify_download(self, filename, *args):
+        if filename not in self._progress: return
+        self._progress[filename][2] += 1
         self._update()
 
     def _update(self):
+        b_used, b_total = self._buffer
+        sys.stderr.write("\033[K")
+        sys.stderr.write(f"Buffer: {b_used:0{len(str(b_total))}d}/{b_total} | ")
         sys.stderr.write(" | ".join([f"{p}/{t} ({min(99., 100*p2/t2):02.0f}%)"
             for name, (p, t, p2, t2) in self._progress.items()]))
         sys.stderr.write("\r")
         sys.stderr.flush()
-
-    def set_sub_totals(self, name, total):
-        if name not in self._progress: return
-        self._progress[name][3] = total
-
-    def notify_download(self, name):
-        if name not in self._progress: return
-        self._progress[name][2] += 1
-        self._update()
 
 logger = Logger()
 
@@ -75,10 +99,11 @@ class AbstractCrawl:
     def __init__(self, b):
         self._b = b
 
+    @no_parallel_execution
+    @retry_after_exception
     def login(self):
-        try: 
-            self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
-            self._b.find_by_text("Login").click()
+        self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
+        try: self._b.find_by_text("Login").click()
         except (ElementNotInteractableException, ElementDoesNotExist) as e:
             print("Error logging in: %s"%repr(e))
             return
@@ -92,13 +117,13 @@ class AbstractCrawl:
 
 class CrawlIndices(AbstractCrawl):
 
+    @no_parallel_execution
     def get_viewers(self):
         self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
         region = self.xpath("//li[contains(text(), 'Braunschweig')]")
         viewers = list(self._get_viewer_urls(region))
         return viewers
         #for e in list(self._get_viewer_urls(region)): self._scrape_book(e)
-        #self._scrape_book((["test"], "https://www.archion.de/de/viewer/?no_cache=1&type=churchRegister&uid=277784"))
 
     def _close_books(self):
         while self._b.is_element_visible_by_xpath("//li[@class='close']"):
@@ -134,116 +159,140 @@ class CrawlIndices(AbstractCrawl):
                 else: break
 
 
+class CountingSemaphore(Semaphore):
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.total = value
+        self.used = 0
+
+    def acquire(self, *args, **xargs):
+        r = super().acquire(*args, **xargs)
+        self.used += 1
+        logger.update_buffer(self)
+        return r
+
+    def release(self, *args, **xargs):
+        r = super().release(*args, **xargs)
+        self.used -= 1
+        logger.update_buffer(self)
+        return r
+
+
 class BookScraper(AbstractCrawl):
     login_lock = Lock()
     cookies = None
+    _url_crawler_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
+    _executor = Executor(max_workers=DOWNLOAD_PROCESSES)
 
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
         if os.path.exists("downloaded"):
             with open("downloaded") as fp: self.downloaded = [e.strip() for e in fp]
         else: self.downloaded = []
-        self._applied_cookies = None
         self.login()
-
-    def login(self):
-        """ thread safe login """
-        with self.login_lock:
-            if self.cookies == self._applied_cookies:
-                # login and store cookies
-                super().login()
-                self.__class__.cookies = self._b.cookies.all()
-            else:
-                # apply cookies
-                self._b.visit("https://www.archion.de/")
-                self._b.cookies.delete_all()
-                self._b.cookies.add(self.cookies)
-                self._applied_cookies = self.cookies
 
     def scrape_books(self, urls):
         for url in urls:
-            while True:
-                try: self.scrape_book(url)
-                except (Exception, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist):
-                    traceback.print_exc()
-                    time.sleep(10)
-                    self.login()
-                else: break
+            self.scrape_book(url)
 
-    def scrape_book(self, href, pages=None):
-        if href in self.downloaded or pages:
+    def scrape_book(self, *args, **xargs):
+        while True:
+            try: self._scrape_book(*args, **xargs)
+            except (Exception, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
+                if isinstance(e, KeyboardInterrupt): raise
+                traceback.print_exc()
+                time.sleep(10)
+                self.login()
+            else: break
+
+    @no_parallel_execution
+    def _scrape_book(self, href, pages=None):
+        """ pages: list of int, pages that should be downloaded """
+        if href in self.downloaded and pages == None:
             #print(f"Already downloaded {href}")
             return
+        def on_finish_book():
+            with open("downloaded", "a") as fp: fp.write(f"{href}\n")
+            print(f"Finished {path}")
+
         self._b.visit(href)
         path = [e.text for e in list(self.xpath("//*[@class='dvbreadcrumb']/a"))[1:]]
+        print(f"Starting {path}")
         for i in range(ZOOM):
             self.xpath("//a[@class='zoom-in']").click()
             time.sleep(1)
         pages_e = list(self.xpath("//select[@class='page-select']/option"))
-        for i, page in enumerate(pages_e):
-            if pages and i not in pages: continue
+        finished_pages = set()
+        for page in pages_e:
+            page_no = int(page["value"]) #FIXME +1
+            if pages and page_no not in pages: continue
             digits = len(pages_e[-1]["value"])
-            filename = self._make_filename(path, page["value"].zfill(digits)+".jpg")
+            filename = self._make_filename(path, str(page_no).zfill(digits)+".jpg")
             if os.path.exists(filename): continue
-            logger.update(path, i+1, len(pages_e))
+            def on_finish_page(page_no_=page_no, filename_=filename):
+                logger.finished_page(filename_)
+                finished_pages.add(page_no_)
+                if len(finished_pages) == len(pages_e): on_finish_book()
             page.click()
-            tiles = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
-            #time.sleep(1)
-            #tiles = [s.replace("&amp;","&") for s in re.findall('_src="([^"]*)"', self.xpath("//*[@class='zoom-tiles']").html)]
-            im = self._unite_tiles(str(path), [(*map(int, re.findall("/(\d*)_(\d*)\.jpg", src)[0]), urljoin(self._b.url, src))
-                for src in tiles])
-            im.save(filename,optimize=True,quality=JPEG_QUALITY)
-        with dl_file_lock:
-            with open("downloaded", "a") as fp: fp.write(f"{href}\n")
+            for _ in range(3):
+                tiles_src = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
+                if tiles_src: break
+                else: time.sleep(3)
+            logger.starting_page(filename, page_no, len(pages_e), len(tiles_src))
+            futures = []
+            positions = []
+            for src in tiles_src:
+                tile_url = urljoin(self._b.url, src)
+                x, y = tuple(map(int, re.findall("/(\d*)_(\d*)\.jpg", src)[0]))
+                self._url_crawler_semaphore.acquire()
+                future = self._executor.submit(self._download, filename, tile_url, page_no)
+                futures.append(future)
+                positions.append((x,y))
+            Thread(target=self._unite_tiles, args=(filename, (href, pages), positions, futures, on_finish_page),
+                name=f"Unite_tiles_{filename}.{page_no}").start()
 
-    def _download(self, name, tiles, downloaded):
-        for i, (x,y,url) in enumerate(tiles):
+    def _download(self, filename, url, page_no):
+        try:
             for j in range(3):
-                try: 
+                try:
                     resp = requests.get(url, timeout=4)
                     if resp.status_code != 200: raise Exception(f"Return code {resp.status_code} != 200")
-                except Exception as e:
-                    sys.stderr.write(f"Exception downloading url {url}: {repr(e)}\n")
+                except Exception as e: # ReadTimeout
                     if j == 2:
-                        #raise
-                        return
+                        sys.stderr.write(f"Exception downloading url {url}: {repr(e)}\n")
+                        raise
                     time.sleep(1)
-                else: break
-            logger.notify_download(name)
-            try: im = Image.open(io.BytesIO(resp.content))
-            except:
-                print(f"Exception opening image {url}")
-                raise
-            downloaded.append((x,y,im))
+                else:
+                    logger.notify_download(filename, page_no)
+                    return Image.open(io.BytesIO(resp.content))
+        finally:
+            self._url_crawler_semaphore.release()
 
-    def _unite_tiles(self, name, tiles):
-        downloaded = []
-        threads = [
-            Thread(target=self._download, args=(name, tiles_, downloaded), daemon=True, name=f"Download {name}")
-            for tiles_ in chunks(tiles, math.ceil(len(tiles)/DOWNLOAD_PROCESSES))]
-        logger.set_sub_totals(name, len(tiles))
-        #print(f"\nDownloading {len(tiles)} tiles in {len(threads)} threads.")
-        for thread in threads: thread.start()
-        for thread in threads: thread.join()
-        if not len(downloaded) == len(tiles): raise ConnectionError("Download unsuccessful.")
-        #for i, (x, y, url) in enumerate(tiles):
-        #    downloaded.append((x,y,Image.open(io.BytesIO(requests.get(url).content))))
-        #    #sys.stderr.write(f"\rDownloading ({i+1}/{len(tiles)})")
-        #    #sys.stderr.flush()
-        #tiles = [(x,y,Image.open(io.BytesIO(requests.get(url).content))) for x, y, url in tiles]
-        tiles = downloaded
-        #sys.stderr.write("\n")
-        #sys.stderr.flush()
+    def _unite_tiles(self, filename, scrape_book_args, positions, futures, on_success=None):
+        """
+            on_success: callback that will be called after this method has finished
+        """
+        done, not_done = concurrent.futures.wait(futures, timeout=None,
+            return_when=concurrent.futures.FIRST_EXCEPTION)
+        try: tiles = [(x, y, future.result()) for (x, y), future in zip(positions, futures)]
+        except:
+            # Exception in _download()
+            traceback.print_exc()
+            for f in not_done:
+                if f.cancel(): self._url_crawler_semaphore.release()
+            self._scrape_book(*scrape_book_args) # retry # TODO: only once
+            return
         total_width = sum([im.size[0] for x,y,im in tiles if y==0])
         total_height = sum([im.size[1] for x,y,im in tiles if x==0])
-        #width, height = tiles[0][2].size
         widths = [tile[2].size[0] for tile in tiles]
         heights = [tile[2].size[1] for tile in tiles]
         width = max(widths, key = widths.count)
         height = max(heights, key = heights.count)
-        new = Image.new('RGB' if COLOUR else 'L',(total_width, total_height))
-        for x,y,im in tiles: new.paste(im, (x*width, y*height))
-        return new
+        im = Image.new('RGB' if COLOUR else 'L',(total_width, total_height))
+        for x, y, tile in tiles: im.paste(tile, (x*width, y*height))
+        im.save(filename, optimize=True, quality=JPEG_QUALITY)
+        if on_success: on_success()
 
     def _make_filename(self, path, filename):
         path = [sanitize(p) for p in path]
@@ -252,17 +301,6 @@ class BookScraper(AbstractCrawl):
             try: os.mkdir(os.path.join(*list(path[:(i+1)])))
             except FileExistsError: pass
         return os.path.join(*path, filename)
-
-
-def sanitize(s):
-    valid_chars = "ÄÖÜäöüß-_.() %s%s" % (string.ascii_letters, string.digits)
-    return ''.join(c for c in s if c in valid_chars)
-
-
-def chunks(lst, n):
-    """Yield successive n-sized chunks from lst."""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
 
 
 if __name__ == '__main__': main()
