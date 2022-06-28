@@ -226,16 +226,20 @@ class BookScraper(AbstractCrawl):
             time.sleep(1)
         pages_e = list(self.xpath("//select[@class='page-select']/option"))
         finished_pages = set()
+        def mark_page_done(page_no):
+            finished_pages.add(page_no)
+            if len(finished_pages) == len(pages_e): on_finish_book()
         for page in pages_e:
             page_no = int(page["value"]) #FIXME +1
             if pages and page_no not in pages: continue
             digits = len(pages_e[-1]["value"])
             filename = self._make_filename(path, str(page_no).zfill(digits)+".jpg")
-            if os.path.exists(filename): continue
+            if os.path.exists(filename) and not DRYRUN:
+                mark_page_done(page_no)
+                continue
             def on_finish_page(page_no_=page_no, filename_=filename):
                 logger.finished_page(filename_)
-                finished_pages.add(page_no_)
-                if len(finished_pages) == len(pages_e): on_finish_book()
+                mark_page_done(page_no_)
             page.click()
             for _ in range(3):
                 tiles_src = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
