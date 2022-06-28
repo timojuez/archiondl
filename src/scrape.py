@@ -44,7 +44,8 @@ def main():
 def crawl_indices():
     with Browser() as browser:
         viewers = CrawlIndices(browser).get_viewers()
-    with open("viewers.json", "w") as fp: json.dump(viewers, fp)
+    if not DRYRUN:
+        with open("viewers.json", "w") as fp: json.dump(viewers, fp)
 
 def crawl_books():
     with open("viewers.json") as fp: viewers = json.load(fp)
@@ -192,9 +193,9 @@ class BookScraper(AbstractCrawl):
         else: self.downloaded = []
         self.login()
 
-    def scrape_books(self, urls):
+    def scrape_books(self, urls, *args, **xargs):
         for url in urls:
-            self.scrape_book(url)
+            self.scrape_book(url, *args, **xargs)
 
     def scrape_book(self, *args, **xargs):
         while True:
@@ -213,7 +214,8 @@ class BookScraper(AbstractCrawl):
             #print(f"Already downloaded {href}")
             return
         def on_finish_book():
-            with open("downloaded", "a") as fp: fp.write(f"{href}\n")
+            if not DRYRUN:
+                with open("downloaded", "a") as fp: fp.write(f"{href}\n")
             print(f"Finished {path}")
 
         self._b.visit(href)
