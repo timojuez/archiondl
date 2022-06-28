@@ -256,7 +256,7 @@ class BookScraper(AbstractCrawl):
                 futures.append(future)
                 positions.append((x,y))
             Thread(target=self._unite_tiles, args=(filename, (href, pages), positions, futures, on_finish_page),
-                name=f"Unite_tiles_{filename}.{page_no}").start()
+                name=f"Unite_tiles: {filename}").start()
 
     def _download(self, filename, url, page_no):
         try:
@@ -266,7 +266,7 @@ class BookScraper(AbstractCrawl):
                     if resp.status_code != 200: raise Exception(f"Return code {resp.status_code} != 200")
                 except Exception as e: # ReadTimeout
                     if j == 2:
-                        sys.stderr.write(f"Exception downloading url {url}: {repr(e)}\n")
+                        sys.stderr.write(f"Exception downloading url {url} to {filename}.\n")
                         raise
                     time.sleep(1)
                 else:
