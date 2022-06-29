@@ -210,7 +210,7 @@ class BookScraper(AbstractCrawl):
         failed_urls = set([url for url, t in threads if t.join() == False])
         if failed_urls:
             print("Repeating failed items...")
-            self.scrape_books(failed_urls)
+            self.scrape_books(failed_urls, *args, **xargs)
 
     def scrape_book(self, url, *args, **xargs):
         self.scrape_books([url], *args, **xargs)
