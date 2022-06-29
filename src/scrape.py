@@ -215,6 +215,14 @@ class BookScraper(AbstractCrawl):
             if not DRYRUN:
                 with open("downloaded", "a") as fp: fp.write(f"{href}\n")
             print(f"Finished {path}")
+        def mark_page_done(page_no):
+            finished_pages.add(page_no)
+            if len(finished_pages) == len(pages_e): on_finish_book()
+        def on_page_success(filename):
+            logger.finished_page(filename)
+            mark_page_done(filename)
+        def on_page_fail(filename, scrape_book_args):
+            logger.failed_page(filename)
 
         self._b.visit(href)
         path = [e.text for e in list(self.xpath("//*[@class='dvbreadcrumb']/a"))[1:]]
@@ -224,9 +232,6 @@ class BookScraper(AbstractCrawl):
             time.sleep(1)
         pages_e = list(self.xpath("//select[@class='page-select']/option"))
         finished_pages = set()
-        def mark_page_done(page_no):
-            finished_pages.add(page_no)
-            if len(finished_pages) == len(pages_e): on_finish_book()
         for page in pages_e:
             page_no = int(page["value"]) #FIXME +1
             if pages and page_no not in pages: continue
@@ -235,9 +240,6 @@ class BookScraper(AbstractCrawl):
             if os.path.exists(filename) and not DRYRUN:
                 mark_page_done(page_no)
                 continue
-            def on_finish_page(page_no_=page_no, filename_=filename):
-                logger.finished_page(filename_)
-                mark_page_done(page_no_)
             page.click()
             for _ in range(3):
                 tiles_src = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
@@ -254,8 +256,10 @@ class BookScraper(AbstractCrawl):
                 future = self._executor.submit(self._download, filename, tile_url, page_no)
                 futures.append(future)
                 positions.append((x,y))
-            Thread(target=self._unite_tiles, args=(filename, (href, pages), positions, futures, on_finish_page),
-                name=f"Unite_tiles: {filename}").start()
+            t = Thread(target=self._unite_tiles,
+                args=(filename, (href, pages), positions, futures, on_page_success, on_page_fail),
+                name=f"Unite_tiles: {filename}")
+            t.start()
 
     def _download(self, filename, url, page_no):
         try:
@@ -274,7 +278,7 @@ class BookScraper(AbstractCrawl):
         finally:
             self._url_crawler_semaphore.release()
 
-    def _unite_tiles(self, filename, scrape_book_args, positions, futures, on_success=None):
+    def _unite_tiles(self, filename, scrape_book_args, positions, futures, on_success=None, on_failure=None):
         """
             on_success: callback that will be called after this method has finished
         """
@@ -286,6 +290,7 @@ class BookScraper(AbstractCrawl):
             traceback.print_exc()
             for f in not_done:
                 if f.cancel(): self._url_crawler_semaphore.release()
+            if on_failure: on_failure(filename, scrape_book_args)
             self._scrape_book(*scrape_book_args) # retry # TODO: only once
             return
         total_width = sum([im.shape[1] for x,y,im in tiles if y==0])
