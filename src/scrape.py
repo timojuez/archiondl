@@ -34,11 +34,6 @@ def sanitize(s):
     valid_chars = "ÄÖÜäöüß-_.() %s%s" % (string.ascii_letters, string.digits)
     return ''.join(c for c in s if c in valid_chars)
 
-def chunks(lst, n):
-    """Yield successive n-sized chunks from lst."""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
-
 def main():
     #crawl(["https://www.archion.de/de/viewer/?no_cache=1&type=churchRegister&uid=258332"])
     crawl_books()
@@ -53,10 +48,7 @@ def crawl_books():
     with open("viewers.json") as fp: viewers = json.load(fp)
     urls = set([href for _, href in viewers])
     del viewers
-    urls_chunked = list(chunks(list(urls), math.ceil(len(urls)/BROWSER_PROCESSES)))
-    del urls
-    assert(len(urls_chunked) == BROWSER_PROCESSES)
-    for urls in urls_chunked: Thread(target=crawl, args=(urls,), daemon=False).start()
+    crawl(urls)
 
 def crawl(viewers):
     with Browser('firefox', **BROWSER_KWARGS) as browser:
@@ -198,8 +190,6 @@ class CountingSemaphore(Semaphore):
 
 
 class BookScraper(AbstractCrawl):
-    login_lock = Lock()
-    cookies = None
     _url_crawler_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
     _executor = Executor(max_workers=DOWNLOAD_PROCESSES)
 
