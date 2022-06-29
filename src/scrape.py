@@ -85,22 +85,6 @@ class Logger:
 logger = Logger()
 
 
-class ThreadWithReturnValue(Thread):
-
-    def __init__(self, group=None, target=None, name=None,
-                 args=(), kwargs={}, Verbose=None):
-        super().__init__(group, target, name, args, kwargs)
-        self._return = None
-
-    def run(self):
-        if self._target is not None:
-            self._return = self._target(*self._args, **self._kwargs)
-
-    def join(self, *args):
-        super().join(*args)
-        return self._return
-
-
 class AbstractCrawl:
 
     def __enter__(self):
@@ -192,7 +176,8 @@ class CountingSemaphore(Semaphore):
 
 class BookScraper(AbstractCrawl):
     _url_crawler_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
-    _executor = Executor(max_workers=DOWNLOAD_PROCESSES)
+    _url_crawler_executor = Executor(max_workers=DOWNLOAD_PROCESSES)
+    _unite_tiles_executor = Executor(max_workers=2)
 
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
@@ -206,8 +191,9 @@ class BookScraper(AbstractCrawl):
         return r
 
     def scrape_books(self, urls, *args, **xargs):
-        threads = [(url, t) for url in urls for t in self._scrape_book_repeat(url, *args, **xargs)]
-        failed_urls = set([url for url, t in threads if t.join() == False])
+        futures = {f: url for url in urls for f in self._scrape_book_repeat(url, *args, **xargs)}
+        concurrent.futures.wait(futures.keys())
+        failed_urls = set([url for f, url in futures.items() if f.exception() or f.cancelled()])
         if failed_urls:
             print("Repeating failed items...")
             self.scrape_books(failed_urls, *args, **xargs)
@@ -277,14 +263,12 @@ class BookScraper(AbstractCrawl):
                 tile_url = urljoin(self._b.url, src)
                 x, y = tuple(map(int, re.findall("/(\d*)_(\d*)\.jpg", src)[0]))
                 self._url_crawler_semaphore.acquire()
-                future = self._executor.submit(self._download, filename, tile_url, page_no)
+                future = self._url_crawler_executor.submit(self._download, filename, tile_url, page_no)
                 futures.append(future)
                 positions.append((x,y))
-            t = ThreadWithReturnValue(target=self._unite_tiles,
-                args=(filename, (href, pages), positions, futures, on_page_success, on_page_fail),
-                name=f"Unite_tiles: {filename}")
-            t.start()
-            yield t
+            unite_tiles = self._unite_tiles_executor.submit(
+                self._unite_tiles, filename, (href, pages), positions, futures, on_page_success, on_page_fail)
+            yield unite_tiles
 
     def _download(self, filename, url, page_no):
         try:
@@ -312,11 +296,10 @@ class BookScraper(AbstractCrawl):
         try: tiles = [(x, y, future.result()) for (x, y), future in zip(positions, futures)]
         except:
             # Exception in _download()
-            traceback.print_exc()
             for f in not_done:
                 if f.cancel(): self._url_crawler_semaphore.release()
             if on_failure: on_failure(filename, scrape_book_args)
-            return False
+            raise
         total_width = sum([im.shape[1] for x,y,im in tiles if y==0])
         total_height = sum([im.shape[0] for x,y,im in tiles if x==0])
         widths = [tile[2].shape[1] for tile in tiles]
@@ -342,7 +325,6 @@ class BookScraper(AbstractCrawl):
         if not DRYRUN: self._saveimg(filename, im)
         if DEBUG_OUTPUT: self._saveimg("debug.jpg", im)
         if on_success: on_success(filename)
-        return True
 
     def _saveimg(self, filename, im):
         cv2.imwrite(filename, im, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
