@@ -1,13 +1,12 @@
-import sys, json, time, traceback, argparse, os, requests, io, string, math, socket, re
+import sys, json, time, traceback, argparse, os, requests, io, string, math, socket, re, cv2
 from selenium.common.exceptions import StaleElementReferenceException
 from threading import Thread, Lock, Semaphore
 from splinter import Browser
 from splinter.exceptions import ElementDoesNotExist
-from PIL import Image, ImageOps
 from urllib.parse import urljoin
 from requests.exceptions import ConnectionError
 from selenium.common.exceptions import TimeoutException, ElementNotInteractableException
-#from queue import Queue
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor as Executor
 import concurrent.futures
 from .config import *
@@ -271,7 +270,7 @@ class BookScraper(AbstractCrawl):
                     time.sleep(1)
                 else:
                     logger.notify_download(filename, page_no)
-                    return Image.open(io.BytesIO(resp.content))
+                    return cv2.imdecode(np.frombuffer(resp.content, dtype=np.uint8), cv2.IMREAD_COLOR)
         finally:
             self._url_crawler_semaphore.release()
 
@@ -289,16 +288,34 @@ class BookScraper(AbstractCrawl):
                 if f.cancel(): self._url_crawler_semaphore.release()
             self._scrape_book(*scrape_book_args) # retry # TODO: only once
             return
-        total_width = sum([im.size[0] for x,y,im in tiles if y==0])
-        total_height = sum([im.size[1] for x,y,im in tiles if x==0])
-        widths = [tile[2].size[0] for tile in tiles]
-        heights = [tile[2].size[1] for tile in tiles]
-        width = max(widths, key = widths.count)
-        height = max(heights, key = heights.count)
-        im = Image.new('RGB' if COLOUR else 'L',(total_width, total_height))
-        for x, y, tile in tiles: im.paste(tile, (x*width, y*height))
-        im.save(filename, optimize=True, quality=JPEG_QUALITY)
-        if on_success: on_success()
+        total_width = sum([im.shape[1] for x,y,im in tiles if y==0])
+        total_height = sum([im.shape[0] for x,y,im in tiles if x==0])
+        widths = [tile[2].shape[1] for tile in tiles]
+        heights = [tile[2].shape[0] for tile in tiles]
+        #width = max(widths, key = widths.count)
+        #height = max(heights, key = heights.count)
+        im = np.zeros((total_height, total_width, 3), np.uint8)
+        tiles = sorted(tiles, key=lambda e:(e[1], e[0]))
+        x_ = 0
+        y_ = 0
+        heights = []
+        for x, y, tile in tiles:
+            if x==0:
+                x_=0
+                if heights: y_ += max(heights, key=heights.count)
+                heights = []
+            heights.append(tile.shape[0])
+            im[y_:y_+tile.shape[0], x_:x_+tile.shape[1]] = tile
+            x_ += tile.shape[1]
+        #for x, y, tile in tiles: im[y*height:y*height+tile.shape[0], x*width:x*width+tile.shape[1], :3] = tile
+        #max_x = max([x for x, y, tile in tiles])+1
+        #np.concatenate([np.concatenate([tile for x, y, tile in tiles if x == x_], axis=1) for x_ in range(max_x)]
+        if not DRYRUN: self._saveimg(filename, im)
+        if DEBUG_OUTPUT: self._saveimg("debug.jpg", im)
+        if on_success: on_success(filename)
+
+    def _saveimg(self, filename, im):
+        cv2.imwrite(filename, im, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
     def _make_filename(self, path, filename):
         path = [sanitize(p) for p in path]
