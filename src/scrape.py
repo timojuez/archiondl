@@ -15,12 +15,6 @@ from .config import *
 if DRYRUN: print("DRYRUN mode")
 
 
-no_parallel_execution_lock = Lock()
-def no_parallel_execution(func):
-    def f(*args, **xargs):
-        with no_parallel_execution_lock: return func(*args, **xargs)
-    return f
-
 def retry_after_exception(func):
     def f(*args, **xargs):
         while True:
@@ -67,7 +61,7 @@ class Logger:
         del self._progress[filename]
         self._update()
 
-    def notify_download(self, filename, *args):
+    def notify_download(self, filename):
         if filename not in self._progress: return
         self._progress[filename][2] += 1
         self._update()
@@ -93,7 +87,6 @@ class AbstractCrawl:
     def __exit__(self, *args, **xargs):
         self._b.quit()
 
-    @no_parallel_execution
     @retry_after_exception
     def login(self):
         self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
@@ -111,7 +104,6 @@ class AbstractCrawl:
 
 class CrawlIndices(AbstractCrawl):
 
-    @no_parallel_execution
     def get_viewers(self):
         self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
         region = self.xpath("//li[contains(text(), 'Braunschweig')]")
@@ -174,9 +166,9 @@ class CountingSemaphore(Semaphore):
 
 
 class BookScraper(AbstractCrawl):
-    _url_crawler_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
-    _url_crawler_executor = Executor(max_workers=DOWNLOAD_PROCESSES)
-    _unite_tiles_executor = Executor(max_workers=2)
+    _tile_downloader_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
+    _tile_downloader = Executor(max_workers=DOWNLOAD_PROCESSES)
+    _tiles_concatenator = Executor(max_workers=2)
 
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
@@ -211,7 +203,6 @@ class BookScraper(AbstractCrawl):
                 self.login()
             else: break
 
-    @no_parallel_execution
     def _scrape_book(self, href, pages=None):
         """
         pages: list of int, pages that should be downloaded
@@ -254,22 +245,21 @@ class BookScraper(AbstractCrawl):
                 tiles_src = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
                 if tiles_src: break
                 else: time.sleep(3)
-            if len(tiles_src) == 0: raise Exception(f"No tiles found on {href}, p. {page_no}.")
+            if len(tiles_src) == 0: raise ElementDoesNotExist(f"No tiles found on {href}. id = {filename}.")
             logger.starting_page(filename, page_no, len(pages_e), len(tiles_src))
             futures = []
             positions = []
             for src in tiles_src:
                 tile_url = urljoin(self._b.url, src)
                 x, y = tuple(map(int, re.findall("/(\d*)_(\d*)\.jpg", src)[0]))
-                self._url_crawler_semaphore.acquire()
-                future = self._url_crawler_executor.submit(self._download, filename, tile_url, page_no)
+                self._tile_downloader_semaphore.acquire()
+                future = self._tile_downloader.submit(self._download_img, tile_url, filename)
                 futures.append(future)
                 positions.append((x,y))
-            unite_tiles = self._unite_tiles_executor.submit(
-                self._unite_tiles, filename, (href, pages), positions, futures, on_page_success, on_page_fail)
-            yield unite_tiles
+            yield self._tiles_concatenator.submit(
+                self._concat_tiles, filename, (href, pages), positions, futures, on_page_success, on_page_fail)
 
-    def _download(self, filename, url, page_no):
+    def _download_img(self, url, id_=None):
         try:
             for j in range(3):
                 try:
@@ -277,26 +267,27 @@ class BookScraper(AbstractCrawl):
                     if resp.status_code != 200: raise Exception(f"Return code {resp.status_code} != 200")
                 except Exception as e: # ReadTimeout
                     if j == 2:
-                        sys.stderr.write(f"Exception downloading url {url} to {filename}.\n")
+                        sys.stderr.write(f"Exception downloading url {url}. id = {id_}.\n")
                         raise
                     time.sleep(1)
                 else:
-                    logger.notify_download(filename, page_no)
+                    logger.notify_download(id_)
                     return cv2.imdecode(np.frombuffer(resp.content, dtype=np.uint8), cv2.IMREAD_COLOR)
         finally:
-            self._url_crawler_semaphore.release()
+            self._tile_downloader_semaphore.release()
 
-    def _unite_tiles(self, filename, scrape_book_args, positions, futures, on_success=None, on_failure=None):
+    def _concat_tiles(self, filename, scrape_book_args, positions, futures, on_success=None, on_failure=None):
         """
-            on_success: callback that will be called after this method has finished
+            on_success: on_success(filename) will be called after this method has succeeded
+            on_failure: on_failure(filename, scrape_book_args) will be called otherwise
         """
         done, not_done = concurrent.futures.wait(futures, timeout=None,
             return_when=concurrent.futures.FIRST_EXCEPTION)
         try: tiles = [(x, y, future.result()) for (x, y), future in zip(positions, futures)]
         except:
-            # Exception in _download()
+            # Exception in _download_img()
             for f in not_done:
-                if f.cancel(): self._url_crawler_semaphore.release()
+                if f.cancel(): self._tile_downloader_semaphore.release()
             if on_failure: on_failure(filename, scrape_book_args)
             raise
         total_width = sum([im.shape[1] for x,y,im in tiles if y==0])
@@ -321,11 +312,11 @@ class BookScraper(AbstractCrawl):
         #for x, y, tile in tiles: im[y*height:y*height+tile.shape[0], x*width:x*width+tile.shape[1], :3] = tile
         #max_x = max([x for x, y, tile in tiles])+1
         #np.concatenate([np.concatenate([tile for x, y, tile in tiles if x == x_], axis=1) for x_ in range(max_x)]
-        if not DRYRUN: self._saveimg(filename, im)
-        if DEBUG_OUTPUT: self._saveimg("debug.jpg", im)
+        if not DRYRUN: self._save_img(filename, im)
+        if DEBUG_OUTPUT: self._save_img("debug.jpg", im)
         if on_success: on_success(filename)
 
-    def _saveimg(self, filename, im):
+    def _save_img(self, filename, im):
         cv2.imwrite(filename, im, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
     def _make_filename(self, path, filename):
