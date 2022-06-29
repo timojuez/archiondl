@@ -39,8 +39,8 @@ def main():
     crawl_books()
 
 def crawl_indices():
-    with Browser('firefox', **BROWSER_KWARGS) as browser:
-        viewers = CrawlIndices(browser).get_viewers()
+    with CrawlIndices() as ci:
+        viewers = ci.get_viewers()
     if not DRYRUN:
         with open("viewers.json", "w") as fp: json.dump(viewers, fp)
 
@@ -48,11 +48,8 @@ def crawl_books():
     with open("viewers.json") as fp: viewers = json.load(fp)
     urls = set([href for _, href in viewers])
     del viewers
-    crawl(urls)
-
-def crawl(viewers):
-    with Browser('firefox', **BROWSER_KWARGS) as browser:
-        BookScraper(browser).scrape_books(viewers)
+    with BookScraper() as bs:
+        bs.scrape_books(urls)
 
 
 class Logger:
@@ -106,8 +103,12 @@ class ThreadWithReturnValue(Thread):
 
 class AbstractCrawl:
 
-    def __init__(self, b):
-        self._b = b
+    def __enter__(self, *args, **xargs):
+        self._b = Browser('firefox', **BROWSER_KWARGS)
+        return self
+
+    def __exit__(self, *args, **xargs):
+        self._b.quit()
 
     @no_parallel_execution
     @retry_after_exception
@@ -198,7 +199,11 @@ class BookScraper(AbstractCrawl):
         if os.path.exists("downloaded"):
             with open("downloaded") as fp: self.downloaded = [e.strip() for e in fp]
         else: self.downloaded = []
+
+    def __enter__(self, *args, **xargs):
+        r = super().__enter__(*args, **xargs)
         self.login()
+        return r
 
     def scrape_books(self, urls, *args, **xargs):
         threads = [(url, t) for url in urls for t in self._scrape_book_repeat(url, *args, **xargs)]
