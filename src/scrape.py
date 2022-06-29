@@ -35,7 +35,6 @@ def sanitize(s):
     return ''.join(c for c in s if c in valid_chars)
 
 def main():
-    #crawl(["https://www.archion.de/de/viewer/?no_cache=1&type=churchRegister&uid=258332"])
     crawl_books()
 
 def crawl_indices():
