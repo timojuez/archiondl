@@ -239,8 +239,8 @@ class BookScraper(AbstractCrawl):
             if not DRYRUN:
                 with open("downloaded", "a") as fp: fp.write(f"{href}\n")
             print(f"Finished {path}")
-        def mark_page_done(page_no):
-            finished_pages.add(page_no)
+        def mark_page_done(p):
+            finished_pages.add(p)
             if len(finished_pages) == len(pages_e): on_finish_book()
         def on_page_success(filename):
             logger.finished_page(filename)
