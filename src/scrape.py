@@ -69,7 +69,6 @@ class Logger:
         self._update()
 
     def starting_page(self, filename, page_no, page_total, tiles_total):
-        if tiles_total == 0: tiles_total = -1
         self._progress[filename] = [page_no, page_total, 0, tiles_total]
         self._update()
 
@@ -244,6 +243,7 @@ class BookScraper(AbstractCrawl):
                 tiles_src = [tile["_src"] for tile in self.xpath("//*[@class='zoom-tiles']/img")]
                 if tiles_src: break
                 else: time.sleep(3)
+            if len(tiles_src) == 0: raise Exception(f"No tiles found on {href}, p. {page_no}.")
             logger.starting_page(filename, page_no, len(pages_e), len(tiles_src))
             futures = []
             positions = []
