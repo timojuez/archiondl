@@ -1,14 +1,13 @@
-import sys, json, time, traceback, argparse, os, requests, io, string, math, socket, re, cv2
-from selenium.common.exceptions import StaleElementReferenceException
-from threading import Thread, Lock, Semaphore
+import sys, json, time, traceback, argparse, os, requests, io, string, socket, re, cv2
+import numpy as np
+from threading import Semaphore
+from concurrent import futures
+from urllib.parse import urljoin
 from splinter import Browser
 from splinter.exceptions import ElementDoesNotExist
-from urllib.parse import urljoin
-from requests.exceptions import ConnectionError
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.common.exceptions import TimeoutException, ElementNotInteractableException
-import numpy as np
-from concurrent.futures import ThreadPoolExecutor as Executor
-import concurrent.futures
+from requests.exceptions import ConnectionError
 from .config import *
 
 
@@ -167,8 +166,8 @@ class CountingSemaphore(Semaphore):
 
 class BookScraper(AbstractCrawl):
     _tile_downloader_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
-    _tile_downloader = Executor(max_workers=DOWNLOAD_PROCESSES)
-    _tiles_concatenator = Executor(max_workers=2)
+    _tile_downloader = futures.ThreadPoolExecutor(max_workers=DOWNLOAD_PROCESSES)
+    _tiles_concatenator = futures.ThreadPoolExecutor(max_workers=2)
 
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
@@ -183,7 +182,7 @@ class BookScraper(AbstractCrawl):
 
     def scrape_books(self, urls, *args, **xargs):
         futures = {f: url for url in urls for f in self._scrape_book_repeat(url, *args, **xargs)}
-        concurrent.futures.wait(futures.keys())
+        futures.wait(futures.keys())
         failed_urls = set([url for f, url in futures.items() if f.exception() or f.cancelled()])
         if failed_urls:
             print("Repeating failed items...")
@@ -206,7 +205,7 @@ class BookScraper(AbstractCrawl):
     def _scrape_book(self, href, pages=None):
         """
         pages: list of int, pages that should be downloaded
-        yielding threads that are processing the images. Finished when all threads finish.
+        yielding futures that are processing the images. Finished when all futures finish.
         """
         if href in self.downloaded and pages == None:
             #print(f"Already downloaded {href}")
@@ -281,8 +280,7 @@ class BookScraper(AbstractCrawl):
             on_success: on_success(filename) will be called after this method has succeeded
             on_failure: on_failure(filename, scrape_book_args) will be called otherwise
         """
-        done, not_done = concurrent.futures.wait(futures, timeout=None,
-            return_when=concurrent.futures.FIRST_EXCEPTION)
+        done, not_done = futures.wait(futures, return_when=futures.FIRST_EXCEPTION)
         try: tiles = [(x, y, future.result()) for (x, y), future in zip(positions, futures)]
         except:
             # Exception in _download_img()
