@@ -44,7 +44,7 @@ def main():
     crawl_books()
 
 def crawl_indices():
-    with Browser() as browser:
+    with Browser('firefox', **BROWSER_KWARGS) as browser:
         viewers = CrawlIndices(browser).get_viewers()
     if not DRYRUN:
         with open("viewers.json", "w") as fp: json.dump(viewers, fp)
@@ -59,7 +59,7 @@ def crawl_books():
     for urls in urls_chunked: Thread(target=crawl, args=(urls,), daemon=False).start()
 
 def crawl(viewers):
-    with Browser('firefox', profile='/home/timo/.mozilla/firefox/9rmc0n9b.archion') as browser:
+    with Browser('firefox', **BROWSER_KWARGS) as browser:
         BookScraper(browser).scrape_books(viewers)
 
 
