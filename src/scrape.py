@@ -12,6 +12,9 @@ import concurrent.futures
 from .config import *
 
 
+if DRYRUN: print("DRYRUN mode")
+
+
 no_parallel_execution_lock = Lock()
 def no_parallel_execution(func):
     def f(*args, **xargs):
