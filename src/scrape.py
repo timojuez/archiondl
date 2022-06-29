@@ -103,7 +103,7 @@ class ThreadWithReturnValue(Thread):
 
 class AbstractCrawl:
 
-    def __enter__(self, *args, **xargs):
+    def __enter__(self):
         self._b = Browser('firefox', **BROWSER_KWARGS)
         return self
 
@@ -200,8 +200,8 @@ class BookScraper(AbstractCrawl):
             with open("downloaded") as fp: self.downloaded = [e.strip() for e in fp]
         else: self.downloaded = []
 
-    def __enter__(self, *args, **xargs):
-        r = super().__enter__(*args, **xargs)
+    def __enter__(self):
+        r = super().__enter__()
         self.login()
         return r
 
