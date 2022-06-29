@@ -220,8 +220,7 @@ class BookScraper(AbstractCrawl):
         while True:
             try:
                 for t in self._scrape_book(*args, **xargs): yield t
-            except (Exception, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
-                if isinstance(e, KeyboardInterrupt): raise
+            except (TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
                 traceback.print_exc()
                 time.sleep(10)
                 self.login()
