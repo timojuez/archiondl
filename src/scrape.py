@@ -249,7 +249,7 @@ class BookScraper(AbstractCrawl):
             logger.finished_page(filename)
             mark_page_done(filename)
         def on_page_fail(filename, scrape_book_args):
-            logger.failed_page(filename)
+            logger.finished_page(filename)
 
         self._b.visit(href)
         path = [e.text for e in list(self.xpath("//*[@class='dvbreadcrumb']/a"))[1:]]
