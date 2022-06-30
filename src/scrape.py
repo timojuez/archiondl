@@ -1,7 +1,7 @@
 import sys, json, time, traceback, argparse, os, requests, io, string, socket, re, cv2
 import numpy as np
 from threading import Semaphore
-from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
 from urllib.parse import urljoin
 from splinter import Browser
 from splinter.exceptions import ElementDoesNotExist
@@ -166,8 +166,8 @@ class CountingSemaphore(Semaphore):
 
 class BookScraper(AbstractCrawl):
     _tile_downloader_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
-    _tile_downloader = futures.ThreadPoolExecutor(max_workers=DOWNLOAD_PROCESSES)
-    _tiles_concatenator = futures.ThreadPoolExecutor(max_workers=2)
+    _tile_downloader = ThreadPoolExecutor(max_workers=DOWNLOAD_PROCESSES)
+    _tiles_concatenator = ThreadPoolExecutor(max_workers=2)
 
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
@@ -182,7 +182,7 @@ class BookScraper(AbstractCrawl):
 
     def scrape_books(self, urls, *args, **xargs):
         futures = {f: url for url in urls for f in self._scrape_book_repeat(url, *args, **xargs)}
-        futures.wait(futures.keys())
+        wait(futures.keys())
         failed_urls = set([url for f, url in futures.items() if f.exception() or f.cancelled()])
         if failed_urls:
             print("Repeating failed items...")
@@ -280,7 +280,7 @@ class BookScraper(AbstractCrawl):
             on_success: on_success(filename) will be called after this method has succeeded
             on_failure: on_failure(filename, scrape_book_args) will be called otherwise
         """
-        done, not_done = futures.wait(futures, return_when=futures.FIRST_EXCEPTION)
+        done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
         try: tiles = [(x, y, future.result()) for (x, y), future in zip(positions, futures)]
         except:
             # Exception in _download_img()
