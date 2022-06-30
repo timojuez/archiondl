@@ -11,9 +11,6 @@ from requests.exceptions import ConnectionError
 from .config import *
 
 
-if DRYRUN: print("DRYRUN mode")
-
-
 def retry_after_exception(func):
     def f(*args, **xargs):
         while True:
@@ -28,20 +25,45 @@ def sanitize(s):
     return ''.join(c for c in s if c in valid_chars)
 
 def main():
-    crawl_books()
+    global DRYRUN
+    parser = argparse.ArgumentParser(description='What this program does')
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-def crawl_indices():
-    with CrawlIndices() as ci:
-        viewers = ci.get_viewers()
-    if not DRYRUN:
-        with open("viewers.json", "w") as fp: json.dump(viewers, fp)
+    parser_a = subparsers.add_parser('download', aliases=["dl"], help='Download a single Archion book')
+    parser_a.add_argument("-p", "--pages", type=int, metavar="PAGE_NO", nargs="+", help='Only download given pages')
+    parser_a.add_argument("url", type=str, help='URL to a book viewer')
 
-def crawl_books():
-    with open("viewers.json") as fp: viewers = json.load(fp)
-    urls = set([href for _, href in viewers])
-    del viewers
-    with BookScraper() as bs:
-        bs.scrape_books(urls)
+    parser_b = subparsers.add_parser('crawl', help='Crawl a list of URLs to books')
+    parser_b.add_argument("region", type=str, help="String that matches the region, e.g. 'Braunschweig'")
+    parser_b.add_argument("outfile", type=argparse.FileType('w', encoding='UTF-8'), help="Write URLs to file")
+
+    parser_c = subparsers.add_parser('downloadlist', help='Download Archion books by list')
+    group = parser_c.add_mutually_exclusive_group(required=True)
+    group.add_argument("--urls", type=str, metavar="URL", nargs="+", help='URL to a book viewer')
+    group.add_argument("--urlfile", type=argparse.FileType(encoding='UTF-8'), metavar="PATH", help='Path to output by crawl')
+
+    parser.add_argument('--dryrun', default=False, action='store_true', help='Do not write to harddisk')
+    args = parser.parse_args()
+
+    DRYRUN = args.dryrun
+    if DRYRUN: print("DRYRUN mode")
+
+    if args.command == "crawl":
+        with CrawlIndices() as ci:
+            book_urls = [(0, url) for url in ci.get_book_urls_by_region_name(args.region)]
+        if not DRYRUN:
+            json.dump(book_urls, args.outfile)
+    elif args.command in ("download", "dl"):
+        with BookScraper() as bs:
+            bs.scrape_books([args.url], args.pages)
+    elif args.command == "downloadlist":
+        if args.urls:
+            book_urls = args.urls
+        else:
+            book_urls = [url for _, url in json.load(args.urlfile)]
+        with BookScraper() as bs:
+            bs.scrape_books(set(book_urls))
+    else: raise Exception("Command missing")
 
 
 class Logger:
@@ -103,12 +125,11 @@ class AbstractCrawl:
 
 class CrawlIndices(AbstractCrawl):
 
-    def get_viewers(self):
+    def get_book_urls_by_region_name(self, region):
         self._b.visit("https://www.archion.de/de/browse/?no_cache=1")
-        region = self.xpath("//li[contains(text(), 'Braunschweig')]")
-        viewers = list(self._get_viewer_urls(region))
-        return viewers
-        #for e in list(self._get_viewer_urls(region)): self._scrape_book(e)
+        region_e = self.xpath(f"//li[contains(text(), '{region}')]")
+        books = list(self._get_book_urls_by_region(region_e))
+        return books
 
     def _close_books(self):
         while self._b.is_element_visible_by_xpath("//li[@class='close']"):
@@ -117,7 +138,7 @@ class CrawlIndices(AbstractCrawl):
                 if self._b.is_element_visible_by_xpath("//li[@class='close']"): raise
             finally: time.sleep(.2)
 
-    def _get_viewer_urls(self, region):
+    def _get_book_urls_by_region(self, region):
         region.click()
         churches = list(self.xpath("//*[@id='mCSB_2']//li[@class='digitallyAvailable']"))
         for i, church in enumerate(churches):
@@ -133,13 +154,7 @@ class CrawlIndices(AbstractCrawl):
                         except:
                             print(f"Error in book.click(). books = {books}")
                             raise
-                        link = self.xpath("//*[contains(@href, 'viewer')]")["href"]
-                        path = [self.xpath(f"//*[@class='lvl-{i}']").text.strip() for i in (1,2,3,4)]
-                        path = list(filter(lambda e:e, path))
-                        #print(path[1:], link)
-                        r = (path, link)
-                        with open("viewers","a") as fp: fp.write("%s\n"%json.dumps(r))
-                        yield r
+                        yield self.xpath("//*[contains(@href, 'viewer')]")["href"]
                 except StaleElementReferenceException: pass
                 else: break
 
@@ -180,16 +195,19 @@ class BookScraper(AbstractCrawl):
         self.login()
         return r
 
-    def scrape_books(self, urls, *args, **xargs):
-        futures = {f: url for url in urls for f in self._scrape_book_repeat(url, *args, **xargs)}
-        wait(futures.keys())
-        failed_urls = set([url for f, url in futures.items() if f.exception() or f.cancelled()])
-        if failed_urls:
+    def scrape_books(self, urls, pages=None):
+        pages = pages or [None]*len(urls)
+        assert(len(pages) == len(urls))
+        futures = [list(self._scrape_book_repeat(*args)) for args in zip(urls, pages)]
+        wait([f for l in futures for f in l])
+        mask = [any([f.exception() or f.cancelled() for f in l]) for l in futures]
+        urls = [url for mask, url in zip(mask, urls) if mask]
+        pages = [pages_ for mask, pages_ in zip(mask, pages) if mask]
+        if urls:
             print("Repeating failed items...")
-            self.scrape_books(failed_urls, *args, **xargs)
+            self.scrape_books(urls, pages)
 
-    def scrape_book(self, url, *args, **xargs):
-        self.scrape_books([url], *args, **xargs)
+    def scrape_book(self, url, pages=None): self.scrape_books([url], [pages])
 
     def _scrape_book_repeat(self, *args, **xargs):
         """ Keep repeating _scrape_book() until all succeeds """
