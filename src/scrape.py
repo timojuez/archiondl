@@ -214,27 +214,26 @@ class BookScraper(AbstractCrawl):
     def scrape_books(self, urls, pages=None):
         pages = pages or [None]*len(urls)
         assert(len(pages) == len(urls))
-        futures = [list(self._scrape_book_repeat(*args)) for args in zip(urls, pages)]
-        wait([f for l in futures for f in l])
-        mask = [any([f.exception() or f.cancelled() for f in l]) for l in futures]
-        urls = [url for mask, url in zip(mask, urls) if mask]
-        pages = [pages_ for mask, pages_ in zip(mask, pages) if mask]
-        if urls:
-            print("Repeating failed items...")
-            self.scrape_books(urls, pages)
+        args_ = list(zip(urls, pages))
+        while args_:
+            threads = []
+            for args in args_:
+                while True:
+                    try:
+                        t = self._scrape_book(*args)
+                    except (WebDriverException, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist):
+                        # Exception in _scrape_book(): crawling tiles
+                        traceback.print_exc()
+                        print("Repeating failed items...")
+                        time.sleep(10)
+                        self.login()
+                    else:
+                        threads.append(t)
+                        break
+            args_ = [args for args, t in zip(args_, threads) if not t.join()]
 
     def scrape_book(self, url, pages=None): self.scrape_books([url], [pages])
 
-    def _scrape_book_repeat(self, *args, **xargs):
-        """ Keep repeating _scrape_book() until all succeeds """
-        while True:
-            try:
-                for t in self._scrape_book(*args, **xargs): yield t
-            except (WebDriverException, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
-                traceback.print_exc()
-                time.sleep(10)
-                self.login()
-            else: break
 
     def _scrape_book(self, href, pages=None):
         """
