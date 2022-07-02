@@ -1,6 +1,6 @@
 import sys, json, time, traceback, argparse, os, requests, io, string, socket, re, cv2
 import numpy as np
-from threading import Semaphore
+from threading import Semaphore, Thread
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
 from urllib.parse import urljoin
 from splinter import Browser
@@ -64,6 +64,22 @@ def main():
         with BookScraper() as bs:
             bs.scrape_books(set(book_urls))
     else: raise Exception("Command missing")
+
+
+class ThreadWithReturnValue(Thread):
+
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, Verbose=None):
+        super().__init__(group, target, name, args, kwargs)
+        self._return = None
+
+    def run(self):
+        if self._target is not None:
+            self._return = self._target(*self._args, **self._kwargs)
+
+    def join(self, *args):
+        super().join(*args)
+        return self._return
 
 
 class Logger:
@@ -222,12 +238,24 @@ class BookScraper(AbstractCrawl):
 
     def _scrape_book(self, href, pages=None):
         """
+        Download a book.
+            Crawls image tiles for each page and returns after crawling has finished.
+            Threads for downloading and image processing might still be ongoing.
         pages: list of int, pages that should be downloaded
-        yielding futures that are processing the images. Finished when all futures finish.
+        returns Thread that is processing the images. Finished when thread finishes.
         """
         if href in self.downloaded and pages == None:
             #print(f"Already downloaded {href}")
             return
+        def wait_for_book(futures, args):
+            """ returns True on success and False otherwise """
+            try:
+                for concat_tiles_f in futures: concat_tiles_f.result()
+            except:
+                # Exception in _concat_tiles(): downloading+img processing
+                traceback.print_exc()
+                return False
+            else: return True
         def on_finish_book():
             if not DRYRUN:
                 with open("downloaded", "a") as fp: fp.write(f"{href}\n")
@@ -249,6 +277,7 @@ class BookScraper(AbstractCrawl):
             time.sleep(1)
         pages_e = list(self.xpath("//select[@class='page-select']/option"))
         finished_pages = set()
+        concat_tile_futures = []
         for page in pages_e:
             page_no = int(page["value"]) #FIXME +1
             if pages and page_no not in pages: continue
@@ -264,17 +293,19 @@ class BookScraper(AbstractCrawl):
                 else: time.sleep(3)
             if len(tiles_src) == 0: raise ElementDoesNotExist(f"No tiles found on {href}. id = {filename}.")
             logger.starting_page(filename, page_no, len(pages_e), len(tiles_src))
-            futures = []
+            tile_dl_futures = []
             positions = []
             for src in tiles_src:
                 tile_url = urljoin(self._b.url, src)
                 x, y = tuple(map(int, re.findall("/(\d*)_(\d*)\.jpg", src)[0]))
                 self._tile_downloader_semaphore.acquire()
-                future = self._tile_downloader.submit(self._download_img, tile_url, filename)
-                futures.append(future)
+                tile_dl_future = self._tile_downloader.submit(self._download_img, tile_url, filename)
+                tile_dl_futures.append(tile_dl_future)
                 positions.append((x,y))
-            yield self._tiles_concatenator.submit(
-                self._concat_tiles, filename, (href, pages), positions, futures, on_page_success, on_page_fail)
+            concat_tile_futures.append(self._tiles_concatenator.submit(
+                self._concat_tiles, filename, (href, pages), positions, tile_dl_futures, on_page_success, on_page_fail))
+        return ThreadWithReturnValue(target=wait_for_book, args=(concat_tile_futures,(href, pages)),
+            name=f"Waiting for {path}, url = {href}.")
 
     def _download_img(self, url, id_=None):
         try:
