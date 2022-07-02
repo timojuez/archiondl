@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
 from urllib.parse import urljoin
 from splinter import Browser
 from splinter.exceptions import ElementDoesNotExist
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
 from selenium.common.exceptions import TimeoutException, ElementNotInteractableException
 from requests.exceptions import ConnectionError
 from .config import *
@@ -214,7 +214,7 @@ class BookScraper(AbstractCrawl):
         while True:
             try:
                 for t in self._scrape_book(*args, **xargs): yield t
-            except (TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
+            except (WebDriverException, TimeoutException, ConnectionError, socket.gaierror, ElementDoesNotExist) as e:
                 traceback.print_exc()
                 time.sleep(10)
                 self.login()
