@@ -195,21 +195,7 @@ class CountingSemaphore(Semaphore):
         return r
 
 
-class BookScraper(AbstractCrawl):
-    _tile_downloader_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
-    _tile_downloader = ThreadPoolExecutor(max_workers=DOWNLOAD_PROCESSES)
-    _tiles_concatenator = ThreadPoolExecutor(max_workers=2)
-
-    def __init__(self, *args, **xargs):
-        super().__init__(*args, **xargs)
-        if os.path.exists("downloaded"):
-            with open("downloaded") as fp: self.downloaded = [e.strip() for e in fp]
-        else: self.downloaded = []
-
-    def __enter__(self):
-        r = super().__enter__()
-        self.login()
-        return r
+class BatchMixin:
 
     def scrape_books(self, urls, pages=None):
         pages = pages or [None]*len(urls)
@@ -234,6 +220,22 @@ class BookScraper(AbstractCrawl):
 
     def scrape_book(self, url, pages=None): self.scrape_books([url], [pages])
 
+
+class BookMixin(AbstractCrawl):
+    _tile_downloader_semaphore = CountingSemaphore(URL_BUFFER_SIZE)
+    _tile_downloader = ThreadPoolExecutor(max_workers=DOWNLOAD_PROCESSES)
+    _tiles_concatenator = ThreadPoolExecutor(max_workers=2)
+
+    def __init__(self, *args, **xargs):
+        super().__init__(*args, **xargs)
+        if os.path.exists("downloaded"):
+            with open("downloaded") as fp: self.downloaded = [e.strip() for e in fp]
+        else: self.downloaded = []
+
+    def __enter__(self):
+        r = super().__enter__()
+        self.login()
+        return r
 
     def _scrape_book(self, href, pages=None):
         """
@@ -306,6 +308,17 @@ class BookScraper(AbstractCrawl):
         return ThreadWithReturnValue(target=wait_for_book, args=(concat_tile_futures,(href, pages)),
             name=f"Waiting for {path}, url = {href}.")
 
+    def _make_filename(self, path, filename):
+        path = [sanitize(p) for p in path]
+        filename = sanitize(filename)
+        for i in range(len(path)):
+            try: os.mkdir(os.path.join(*list(path[:(i+1)])))
+            except FileExistsError: pass
+        return os.path.join(*path, filename)
+
+
+class TileMixin:
+
     def _download_img(self, url, id_=None):
         try:
             for j in range(3):
@@ -365,13 +378,8 @@ class BookScraper(AbstractCrawl):
     def _save_img(self, filename, im):
         cv2.imwrite(filename, im, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
-    def _make_filename(self, path, filename):
-        path = [sanitize(p) for p in path]
-        filename = sanitize(filename)
-        for i in range(len(path)):
-            try: os.mkdir(os.path.join(*list(path[:(i+1)])))
-            except FileExistsError: pass
-        return os.path.join(*path, filename)
+
+class BookScraper(BatchMixin, BookMixin, TileMixin): pass
 
 
 if __name__ == '__main__': main()
