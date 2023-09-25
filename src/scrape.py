@@ -26,7 +26,8 @@ def sanitize(s):
 
 def main():
     global DRYRUN
-    parser = argparse.ArgumentParser(description='What this program does')
+    parser = argparse.ArgumentParser(
+        description='Als registrierter Nutzer Kirchenbücher von Archion herunterladen')
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     parser_a = subparsers.add_parser('download', aliases=["dl"], help='Download a single Archion book')
