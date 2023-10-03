@@ -215,7 +215,7 @@ class BatchMixin:
                         time.sleep(10)
                         self.login()
                     else:
-                        threads.append(t)
+                        if t: threads.append(t)
                         break
             args_ = [args for args, t in zip(args_, threads) if not t.join()]
 
