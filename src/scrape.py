@@ -306,8 +306,10 @@ class BookMixin(AbstractCrawl):
                 positions.append((x,y))
             concat_tile_futures.append(self._tiles_concatenator.submit(
                 self._concat_tiles, filename, (href, pages), positions, tile_dl_futures, on_page_success, on_page_fail))
-        return ThreadWithReturnValue(target=wait_for_book, args=(concat_tile_futures,(href, pages)),
+        t = ThreadWithReturnValue(target=wait_for_book, args=(concat_tile_futures,(href, pages)),
             name=f"Waiting for {path}, url = {href}.")
+        t.start()
+        return t
 
     def _make_filename(self, path, filename):
         path = [sanitize(p) for p in path]
